@@ -1,0 +1,17 @@
+# 真实配置（含数据库密码），切勿提交
+code-index.ini
+
+# 索引产物
+.code-index/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store

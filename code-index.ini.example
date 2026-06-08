@@ -1,0 +1,19 @@
+# code-index 配置示例
+# ─────────────────────────────────────────────────────────────
+# 用法：复制本文件为 code-index.ini 并填写真实连接信息。
+#   cp code-index.ini.example code-index.ini
+#
+# 本配置仅在「前端路由 = 数据库模式（RuoYi sys_menu）」时需要。
+# 如果你的路由写在 src/router 静态路由文件里，无需任何配置，直接 --build 即可。
+#
+# ⚠️ code-index.ini 含密码，已在 .gitignore 中忽略，切勿提交到版本库。
+#    也可改用环境变量 CODE_INDEX_DB_* 或命令行 --host/--db/--user/--password。
+
+[vue_route_db]
+host = 127.0.0.1
+port = 3306
+database = your-database
+user = your-user
+password = your-password
+# 菜单表名，RuoYi 默认 sys_menu
+table = sys_menu

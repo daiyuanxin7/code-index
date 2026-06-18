@@ -17,3 +17,12 @@ user = your-user
 password = your-password
 # 菜单表名，RuoYi 默认 sys_menu
 table = sys_menu
+
+# ─────────────────────────────────────────────────────────────
+# 前端静态路由：手动指定路由文件（可选）
+# 当路由不在 src/router 自动扫描范围内时使用，例如 JeecgBoot 把路由表
+# 写在 src/config/router.config.js。多个文件用逗号或换行分隔。
+# 路径相对 Vue 前端根（与 @/views 一致）或绝对路径。
+# 也可用命令行 --route-file，或环境变量 CODE_INDEX_ROUTE_FILES（逗号分隔）。
+[vue_route_static]
+files = src/config/router.config.js

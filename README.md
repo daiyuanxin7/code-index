@@ -85,13 +85,40 @@ python3 code_index.py --doctor      # 显示检测到的项目结构、路由模
 2. **路径变量**：`/sj/sjZyProject/count/2024` 能命中 `/sj/sjZyProject/count/{projectYear}`
 3. **关键词模糊**：`sjZyProject` 命中所有含该词的路径；中文菜单名也能搜（前端路由）
 
-## 前端路由：两种模式
+## 前端路由：三种模式
 
-RuoYi 的前端路由有两个来源，工具都支持：
+前端路由可能来自不同地方，工具都支持：
 
 ### 静态模式（默认，无需数据库）
 
-解析 `src/router/index.js` 等文件里的 `constantRoutes` / `dynamicRoutes`，提取 `path → @/views/...` 映射。**开箱即用，不需要任何配置**。适合路由写在前端路由文件里的项目。
+扫描 `src/router/` 下的路由文件，用字符串安全的词法扫描器提取 `path → @/views/...` 映射（不依赖具体变量名，`constantRoutes`/`dynamicRoutes`/`asyncRouterMap` 等都能解析）。**开箱即用，不需要任何配置**。适合路由写在 `src/router/` 里的项目。
+
+### 手动指定路由文件（路由不在 `src/router/` 时）
+
+有些项目把路由表写在非标准位置，自动扫描覆盖不到，例如 **JeecgBoot** 把路由写在 `src/config/router.config.js`。这时手动指定该文件即可（解析逻辑与静态模式一致，会并入索引）：
+
+**方式一：命令行**（可重复 / 逗号分隔，路径相对 Vue 前端根或绝对路径）
+
+```bash
+python3 code_index.py --build --route-file src/config/router.config.js
+python3 code_index.py --build --route-file src/config/router.config.js,src/config/other.js
+```
+
+**方式二：配置文件**（`code-index.ini`）
+
+```ini
+[vue_route_static]
+files = src/config/router.config.js
+```
+
+**方式三：环境变量**（逗号分隔）
+
+```bash
+export CODE_INDEX_ROUTE_FILES=src/config/router.config.js
+python3 code_index.py --build
+```
+
+> 手动指定的文件在静态 / 数据库模式下都会被解析并并入路由索引。`python3 code_index.py --doctor` 可查看已配置的路由文件及是否找到。
 
 ### 数据库模式（RuoYi sys_menu）
 
@@ -161,8 +188,8 @@ python3 code_index.py --build --host 127.0.0.1 --db your-db --user u --password 
 ## 局限性
 
 - 面向常规写法。高度动态拼接的路由、注解里用常量引用的路径、非常规代码风格可能漏掉。
-- 静态路由解析是 best-effort；RuoYi 这类「路由全在 sys_menu 表」的项目，业务页面建议用 DB 模式。
-- 目前聚焦 Java/Spring + RuoYi-Vue。其他语言 / 框架暂不支持。
+- 静态路由解析是 best-effort；路由不在 `src/router/` 时用 `--route-file` 手动指定；路由全在数据库（如 RuoYi `sys_menu`、JeecgBoot 后端动态下发的菜单）时，前端文件里查不到，需用 DB 模式或直接看后端菜单数据。
+- 目前聚焦 Java/Spring 后端 + Vue 前端（RuoYi / JeecgBoot 等）。工具按「自动检测 + 可手动指定」的思路设计，欢迎按需扩展到更多框架 / 语言。
 
 ## License
 

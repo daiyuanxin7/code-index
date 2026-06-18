@@ -174,7 +174,7 @@ def load_config(project_root: str, config_path: str | None) -> dict:
     本函数负责「环境变量 + 配置文件」两层，命令行覆盖在 build_route_index 里处理。
     绝不在源码中硬编码任何凭据。
     """
-    cfg: dict = {"vue_route_db": {}}
+    cfg: dict = {"vue_route_db": {}, "route_files": []}
 
     # 1) 配置文件
     path = config_path or os.path.join(project_root, CONFIG_FILE_NAME)
@@ -186,6 +186,10 @@ def load_config(project_root: str, config_path: str | None) -> dict:
             print(f"[配置] 读取 {path} 失败：{e}")
         if parser.has_section("vue_route_db"):
             cfg["vue_route_db"] = dict(parser.items("vue_route_db"))
+        # 手动指定的静态路由文件（逗号或换行分隔），用于路由不在 src/router 的项目
+        if parser.has_section("vue_route_static"):
+            raw = parser.get("vue_route_static", "files", fallback="")
+            cfg["route_files"] += [s.strip() for s in re.split(r"[,\n]", raw) if s.strip()]
 
     # 2) 环境变量覆盖
     env_map = {
@@ -200,6 +204,11 @@ def load_config(project_root: str, config_path: str | None) -> dict:
         val = os.environ.get(env)
         if val:
             cfg["vue_route_db"][key] = val
+
+    # 3) 环境变量指定的静态路由文件（逗号分隔）
+    env_files = os.environ.get("CODE_INDEX_ROUTE_FILES")
+    if env_files:
+        cfg["route_files"] += [s.strip() for s in env_files.split(",") if s.strip()]
 
     return cfg
 
@@ -951,8 +960,29 @@ def parse_vue_router(filepath: str) -> list[dict]:
     return results
 
 
-def build_route_index_static(proj: Project, vue_root: str) -> dict:
-    """解析 src/router 下的静态路由文件，构建路由索引（无需数据库）。"""
+def _resolve_route_files(vue_root: str, project_root: str, files) -> list:
+    """把用户手动指定的路由文件解析成实际存在的绝对路径。
+    相对路径优先相对 Vue 前端根（与 @/views 一致），其次相对项目根；也支持绝对路径。"""
+    resolved = []
+    for f in files or ():
+        if not f:
+            continue
+        cands = [f] if os.path.isabs(f) else [
+            os.path.join(vue_root, f),
+            os.path.join(project_root, f),
+        ]
+        hit = next((c for c in cands if os.path.isfile(c)), None)
+        if hit:
+            ab = os.path.abspath(hit)
+            if ab not in resolved:
+                resolved.append(ab)
+        else:
+            print(f"[路由] [警告] 手动指定的路由文件未找到：{f}")
+    return resolved
+
+
+def build_route_index_static(proj: Project, vue_root: str, extra_files=()) -> dict:
+    """解析 src/router 下的静态路由文件（可追加手动指定的路由文件），构建路由索引（无需数据库）。"""
     router_dir = os.path.join(vue_root, "src", "router")
     router_files = []
     if os.path.isdir(router_dir):
@@ -964,6 +994,15 @@ def build_route_index_static(proj: Project, vue_root: str) -> dict:
         single = os.path.join(vue_root, "src", "router.js")
         if os.path.isfile(single):
             router_files.append(single)
+
+    # 手动指定的路由文件：覆盖自动扫描到不了的非标准位置
+    # （如 JeecgBoot 的 src/config/router.config.js）
+    manual = _resolve_route_files(vue_root, proj.root, extra_files)
+    for fpath in manual:
+        if fpath not in router_files:
+            router_files.append(fpath)
+    if manual:
+        print(f"[路由] 手动指定 {len(manual)} 个路由文件（含非标准位置）")
 
     print(f"[路由] 静态模式：解析 {len(router_files)} 个路由文件...")
     index: dict = {}
@@ -992,19 +1031,23 @@ def build_route_index_static(proj: Project, vue_root: str) -> dict:
     return index
 
 
-def build_route_index(proj: Project, cli_db: dict) -> dict:
-    """构建前端路由索引：每个 Vue 根优先 DB 模式，未配置则回退静态模式。"""
+def build_route_index(proj: Project, cli_db: dict, route_files=()) -> dict:
+    """构建前端路由索引：每个 Vue 根优先 DB 模式，未配置则回退静态模式。
+    无论哪种模式，手动指定的路由文件（route_files）都会被静态解析并并入。"""
     merged: dict = {}
     db = _db_params(proj, cli_db)
 
     for vue_root in proj.vue_roots:
         if db:
             part = build_route_index_db(proj, vue_root, db)
-            if not part:  # DB 不可用 → 回退静态
+            if not part:  # DB 不可用 → 回退静态（含手动文件）
                 print("[路由] 数据库无结果，回退静态路由解析")
-                part = build_route_index_static(proj, vue_root)
+                part = build_route_index_static(proj, vue_root, route_files)
+            elif route_files:  # DB 有结果，仍并入手动指定的静态路由文件
+                for path, entries in build_route_index_static(proj, vue_root, route_files).items():
+                    part.setdefault(path, []).extend(entries)
         else:
-            part = build_route_index_static(proj, vue_root)
+            part = build_route_index_static(proj, vue_root, route_files)
 
         for path, entries in part.items():
             merged.setdefault(path, []).extend(entries)
@@ -1252,7 +1295,7 @@ def list_routes(proj: Project):
 # 构建 + 体检
 # ════════════════════════════════════════════════════════════════════════════
 
-def cmd_build(proj: Project, cli_db: dict):
+def cmd_build(proj: Project, cli_db: dict, route_files=()):
     if not proj.has_java() and not proj.has_vue():
         print("未检测到可索引的项目结构（Java src/main/java 或 Vue src/views）。")
         print("请把 code_index.py 放到项目根目录，或用 --project 指定路径。")
@@ -1272,7 +1315,7 @@ def cmd_build(proj: Project, cli_db: dict):
         build_mapper_index(proj); print()
         built += ["api", "method", "mapper"]
     if proj.has_vue():
-        build_route_index(proj, cli_db); print()
+        build_route_index(proj, cli_db, route_files); print()
         built.append("route")
 
     manifest = {
@@ -1307,6 +1350,17 @@ def cmd_doctor(proj: Project):
     else:
         print("  数据库模式: 未配置（将使用静态路由解析）")
         print(f"  如需 DB 模式：复制 code-index.ini.example 为 {CONFIG_FILE_NAME} 并填写连接信息")
+
+    cfg_files = proj.config.get("route_files", [])
+    if cfg_files:
+        print("  手动指定的路由文件（配置/环境变量）:")
+        for vue_root in (proj.vue_roots or [proj.root]):
+            for f in cfg_files:
+                resolved = _resolve_route_files(vue_root, proj.root, [f])
+                mark = "✓" if resolved else "✗ 未找到"
+                print(f"    · {f}  [{mark}]")
+    else:
+        print("  手动指定路由文件: 无（路由不在 src/router 时，用 --route-file 或配置 [vue_route_static] files）")
 
     print("\n已有索引:")
     for label, path in [
@@ -1351,6 +1405,14 @@ _HELP_EPILOG = """
   默认走静态路由解析（无需数据库）。若路由全在 sys_menu 表中，
   复制 code-index.ini.example 为 code-index.ini 并填写连接信息，
   或用环境变量 CODE_INDEX_DB_* / 命令行 --host --port --db --user --password。
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 前端静态路由：手动指定路由文件（自动扫描不到时）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  路由不在 src/router（如 JeecgBoot 的 src/config/router.config.js）时：
+    python3 code_index.py --build --route-file src/config/router.config.js
+  多个文件用逗号或多次 --route-file；路径相对 Vue 前端根或绝对路径。
+  也可在 code-index.ini 配 [vue_route_static] files=...，或环境变量 CODE_INDEX_ROUTE_FILES。
 """
 
 
@@ -1371,6 +1433,9 @@ def main():
                         choices=["api", "route"], help="列出全部接口(api)或路由(route)")
     parser.add_argument("--project", metavar="DIR", help="项目根目录，默认脚本所在目录")
     parser.add_argument("--config", metavar="FILE", help="指定配置文件，默认项目根目录的 code-index.ini")
+    parser.add_argument("--route-file", metavar="FILE", action="append",
+                        help="手动指定前端路由配置文件（相对 Vue 前端根或绝对路径；可重复或逗号分隔）。"
+                             "用于路由不在 src/router 的项目，如 JeecgBoot 的 src/config/router.config.js")
     # 数据库连接覆盖（最高优先级）
     parser.add_argument("--host", help="数据库地址")
     parser.add_argument("--port", help="数据库端口")
@@ -1385,13 +1450,17 @@ def main():
         "host": args.host, "port": args.port, "database": args.db,
         "user": args.user, "password": args.password,
     }
+    # 手动指定的路由文件：配置文件/环境变量（load_config 已收集） + 命令行（逗号或多次）
+    route_files = list(config.get("route_files", []))
+    for item in (args.route_file or []):
+        route_files += [s.strip() for s in item.split(",") if s.strip()]
 
     # 是否需要扫描源码目录（构建 / 体检 / 智能查询时需要）
     need_scan = bool(args.build or args.doctor or args.query or args.list)
     proj = Project(project_root, config, scan=need_scan)
 
     if args.build:
-        cmd_build(proj, cli_db)
+        cmd_build(proj, cli_db, route_files)
     elif args.doctor:
         cmd_doctor(proj)
     elif args.method:

@@ -20,7 +20,8 @@
 - **零依赖**：只用 Python 3 标准库（前端 DB 模式可选依赖 `mysql` 命令行客户端）。
 - **单文件**：只有一个 `code_index.py`，复制即用。
 - **自动检测**：自动发现多模块 Maven 的每个 `src/main/java`、Mapper 目录、Vue 前端根。
-- **配置驱动适配**：目录结构 / 命名约定 / 注解都可在 `code-index.ini` 覆盖，适配不同项目而**无需改工具源码**（详见下文）。
+- **框架预设 + 配置驱动**：`--profile jeecg/jhipster/...` 一行套用一类项目约定；目录结构 / 命名 / 注解也可在 `code-index.ini` 逐项覆盖，适配不同项目而**无需改工具源码**（详见下文）。
+- **路径归一**：索引时折叠重复斜杠（源码手误的 `//foo` 与 `/foo` 都能命中），前端路由自动去重。
 - **凭据外置**：数据库连接信息走配置文件 / 环境变量 / 命令行，**绝不写进源码**。
 - **智能匹配**：精确 → 路径变量（`/user/{id}`、`/ra/:accountId`）→ 关键词模糊，逐级回退。
 
@@ -156,6 +157,33 @@ python3 code_index.py --build --host 127.0.0.1 --db your-db --user u --password 
 ```
 
 > 配置了 `database` 即视为启用 DB 模式；DB 连不上时会自动回退到静态模式。
+
+## 框架预设（Profile）：一行套用一类项目约定
+
+不想逐项配置时，用 `--profile` 一行套用某类框架的约定预设：
+
+```bash
+python3 code_index.py --build --profile jeecg     # JeecgBoot：自动带上 src/config/router.config.js 等
+python3 code_index.py --build --profile jhipster  # JHipster：Controller 识别 *Resource.java
+```
+
+也可写进配置文件（持久生效）：
+
+```ini
+[project]
+profile = jeecg
+```
+
+内置预设：
+
+| profile | 适用 | 预设内容 |
+|---------|------|---------|
+| `ruoyi` | RuoYi-Vue | 默认约定；路由走 `sys_menu`(DB) 或 `src/router` |
+| `jeecg` | JeecgBoot | 默认约定 + 路由文件 `src/config/router.config.js` |
+| `jhipster` | JHipster | Controller 识别 `*Resource.java` / `*Controller.java` |
+
+> 优先级：内置默认 < profile < 显式 `[java]/[mapper]/[vue]` 段 < 环境变量 < 命令行。
+> 即 profile 给你一套起点，仍可在其上用下面的配置项逐条微调。`--profile` 也可用 `--doctor` 核对。
 
 ## 配置驱动适配：覆盖默认约定
 

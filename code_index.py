@@ -108,6 +108,32 @@ DEFAULTS = {
 }
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# 命名 Profile：一行套用一类框架的约定预设。
+# profile = DEFAULTS 之上的一组覆盖（conv）+ 默认手动路由文件（route_files）。
+# 生效优先级：DEFAULTS < profile < 显式 [scan]/[java]/[mapper]/[vue] 段 < env < CLI。
+# 仍可在 profile 基础上用 ini 段逐项再覆盖。
+# ────────────────────────────────────────────────────────────────────────────
+
+PROFILES = {
+    "ruoyi": {
+        "note": "RuoYi-Vue：Spring Boot + MyBatis；路由在 sys_menu(DB模式) 或 src/router",
+        "conv": {},                      # 默认约定即贴合 RuoYi
+        "route_files": [],
+    },
+    "jeecg": {
+        "note": "JeecgBoot：Spring Boot + MyBatis-Plus；路由表常写在 src/config/router.config.js",
+        "conv": {},                      # java/mapper 默认已契合 Jeecg
+        "route_files": ["src/config/router.config.js"],
+    },
+    "jhipster": {
+        "note": "JHipster：REST 控制器多为 *Resource.java（起步预设，可再覆盖）",
+        "conv": {"java": {"controller_suffixes": ["Resource.java", "Controller.java"]}},
+        "route_files": [],
+    },
+}
+
+
 def _split_list(raw: str) -> list:
     """把逗号 / 换行分隔的字符串拆成去空白列表。"""
     return [s.strip() for s in re.split(r"[,\n]", raw or "") if s.strip()]
@@ -125,10 +151,17 @@ def _parse_ann_map(raw: str) -> dict:
     return out
 
 
-def _merge_conventions(parser: configparser.ConfigParser | None) -> dict:
-    """以 DEFAULTS 为基底，用 ini 的 [scan]/[java]/[mapper]/[vue] 段覆盖，返回生效约定。"""
+def _merge_conventions(parser: configparser.ConfigParser | None,
+                       profile: str | None = None) -> dict:
+    """以 DEFAULTS 为基底，先套用 profile 预设，再用 ini 段覆盖，返回生效约定。"""
     import copy
     conv = copy.deepcopy(DEFAULTS)
+
+    # 先套用 profile 的约定覆盖（section→key 级合并）
+    if profile and profile in PROFILES:
+        for sec, kv in PROFILES[profile].get("conv", {}).items():
+            conv.setdefault(sec, {}).update(copy.deepcopy(kv))
+
     if parser is None:
         return conv
 
@@ -265,7 +298,8 @@ class Project:
 # 配置加载（凭据外置：CLI 参数 > 环境变量 > 配置文件 > 无默认）
 # ════════════════════════════════════════════════════════════════════════════
 
-def load_config(project_root: str, config_path: str | None) -> dict:
+def load_config(project_root: str, config_path: str | None,
+                profile_override: str | None = None) -> dict:
     """
     读取数据库等敏感配置。优先级：
         命令行参数（在 CLI 层覆盖） > 环境变量 > code-index.ini > 空
@@ -310,8 +344,23 @@ def load_config(project_root: str, config_path: str | None) -> dict:
     if env_files:
         cfg["route_files"] += [s.strip() for s in env_files.split(",") if s.strip()]
 
-    # 4) 项目约定（DEFAULTS + ini 的 [scan]/[java]/[mapper]/[vue] 覆盖）
-    cfg["conv"] = _merge_conventions(parser)
+    # 4) 解析生效 profile：CLI > 环境变量 > ini [project] profile
+    profile = profile_override or os.environ.get("CODE_INDEX_PROFILE")
+    if not profile and parser and parser.has_option("project", "profile"):
+        profile = parser.get("project", "profile").strip() or None
+    if profile and profile not in PROFILES:
+        print(f"[配置] 未知 profile：{profile}（可用：{', '.join(PROFILES)}），已忽略")
+        profile = None
+    cfg["profile"] = profile
+
+    # 5) 项目约定（DEFAULTS + profile 预设 + ini 段覆盖）
+    cfg["conv"] = _merge_conventions(parser, profile)
+
+    # 6) profile 自带的手动路由文件（并入，置前，后续显式配置可叠加）
+    if profile and PROFILES[profile].get("route_files"):
+        for f in PROFILES[profile]["route_files"]:
+            if f not in cfg["route_files"]:
+                cfg["route_files"].insert(0, f)
 
     return cfg
 
@@ -373,6 +422,17 @@ _PATH_RE = re.compile(r'"(/[^"]*)"')
 def _extract_paths_from_annotation(text: str) -> list[str]:
     paths = _PATH_RE.findall(text)
     return paths if paths else [""]
+
+
+def _norm_url(p: str) -> str:
+    """规范化 HTTP / 路由路径：折叠连续斜杠、补前导斜杠、去尾斜杠。
+    让源码里手误的 //foo 与正常的 /foo 在索引中归一，单/双斜杠都能命中。"""
+    p = re.sub(r'/{2,}', '/', p or '')
+    if not p.startswith('/'):
+        p = '/' + p
+    if len(p) > 1:
+        p = p.rstrip('/')
+    return p or '/'
 
 
 def parse_controller(filepath: str, mapping_annotations: dict = MAPPING_ANNOTATIONS,
@@ -454,9 +514,7 @@ def parse_controller(filepath: str, mapping_annotations: dict = MAPPING_ANNOTATI
             http_method = mapping_annotations[annotation_name]
             for prefix in class_prefixes:
                 for mpath in method_paths:
-                    full_path = (prefix.rstrip('/') + '/' + mpath.lstrip('/')).rstrip('/')
-                    if not full_path:
-                        full_path = '/'
+                    full_path = _norm_url(prefix.rstrip('/') + '/' + mpath.lstrip('/'))
                     results.append({
                         "path": full_path,
                         "method": http_method,
@@ -1150,7 +1208,7 @@ def build_route_index_static(proj: Project, vue_root: str, extra_files=()) -> di
                     "source": "static",
                     "router_file": proj.rel(fpath),
                 }
-                index.setdefault(r["path"], []).append(entry)
+                index.setdefault(_norm_url(r["path"]), []).append(entry)
         except Exception as e:
             print(f"  [警告] {fpath}: {e}")
     return index
@@ -1176,6 +1234,17 @@ def build_route_index(proj: Project, cli_db: dict, route_files=()) -> dict:
 
         for path, entries in part.items():
             merged.setdefault(path, []).extend(entries)
+
+    # 去重：同一路径下 (组件, vue 文件, 来源, 菜单ID) 相同的条目只保留一份
+    for path, entries in merged.items():
+        seen, uniq = set(), []
+        for e in entries:
+            key = (e.get("component"), e.get("vue_file"), e.get("source"), e.get("menu_id"))
+            if key in seen:
+                continue
+            seen.add(key)
+            uniq.append(e)
+        merged[path] = uniq
 
     sorted_index = dict(sorted(merged.items()))
     proj.ensure_index_dir()
@@ -1489,7 +1558,12 @@ def cmd_doctor(proj: Project):
 
     jc, mc, vc = proj.conv["java"], proj.conv["mapper"], proj.conv["vue"]
     ann = ", ".join(f"{k}:{v}" for k, v in jc["mapping_annotations"].items())
+    active_profile = proj.config.get("profile")
     print("\n生效约定（可在 code-index.ini 的 [scan]/[java]/[mapper]/[vue] 覆盖）:")
+    if active_profile:
+        print(f"  profile: {active_profile}  —— {PROFILES[active_profile]['note']}")
+    else:
+        print(f"  profile: 未指定（默认 Spring+RuoYi/Jeecg；可用 --profile {' / '.join(PROFILES)}）")
     print(f"  [java]   源码根标志: {jc['source_marker']}   源文件后缀: {', '.join(jc['source_suffixes'])}")
     print(f"  [java]   Controller 后缀: {', '.join(jc['controller_suffixes'])}   类前缀注解: @{jc['class_mapping_annotation']}")
     print(f"  [java]   映射注解: {ann}")
@@ -1553,13 +1627,14 @@ _HELP_EPILOG = """
   也可在 code-index.ini 配 [vue_route_static] files=...，或环境变量 CODE_INDEX_ROUTE_FILES。
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- 配置驱动适配（适配不同目录结构 / 命名 / 注解，无需改源码）
+ 框架预设 / 配置驱动适配（适配不同目录 / 命名 / 注解，无需改源码）
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  python3 code_index.py --doctor      查看当前生效的全部约定
+  python3 code_index.py --build --profile jeecg   一行套用框架约定（ruoyi/jeecg/jhipster）
+  python3 code_index.py --doctor                  查看当前 profile 与生效的全部约定
   在 code-index.ini 的 [scan]/[java]/[mapper]/[vue] 段逐项覆盖默认约定，例如：
     [java]
     controller_suffixes = Controller.java, Api.java
-  详见 README「配置驱动适配」与 code-index.ini.example。
+  详见 README「框架预设」「配置驱动适配」与 code-index.ini.example。
 """
 
 
@@ -1580,6 +1655,8 @@ def main():
                         choices=["api", "route"], help="列出全部接口(api)或路由(route)")
     parser.add_argument("--project", metavar="DIR", help="项目根目录，默认脚本所在目录")
     parser.add_argument("--config", metavar="FILE", help="指定配置文件，默认项目根目录的 code-index.ini")
+    parser.add_argument("--profile", metavar="NAME",
+                        help="套用框架约定预设：" + " / ".join(PROFILES) + "（也可在 ini [project] profile 配置）")
     parser.add_argument("--route-file", metavar="FILE", action="append",
                         help="手动指定前端路由配置文件（相对 Vue 前端根或绝对路径；可重复或逗号分隔）。"
                              "用于路由不在 src/router 的项目，如 JeecgBoot 的 src/config/router.config.js")
@@ -1592,7 +1669,7 @@ def main():
     args = parser.parse_args()
 
     project_root = os.path.abspath(args.project) if args.project else _SCRIPT_DIR
-    config = load_config(project_root, args.config)
+    config = load_config(project_root, args.config, args.profile)
     # 配置中追加的忽略目录，在扫描（构建 Project）前生效
     EXTRA_IGNORE_DIRS.update(config.get("conv", {}).get("scan", {}).get("ignore_dirs", []))
     cli_db = {

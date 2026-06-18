@@ -58,34 +58,131 @@ CONFIG_FILE_NAME = "code-index.ini"
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# 运行时追加的忽略目录（来自配置 [scan] ignore_dirs），由 main() 在加载配置后填充
+EXTRA_IGNORE_DIRS: set = set()
+
 
 def _walk(root):
-    """os.walk 的封装，自动剪掉 IGNORE_DIRS，避免扫描 node_modules / target 等。"""
+    """os.walk 的封装，自动剪掉 IGNORE_DIRS（+ 配置追加的 EXTRA_IGNORE_DIRS），避免扫描 node_modules / target 等。"""
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in IGNORE_DIRS]
+        dirnames[:] = [d for d in dirnames
+                       if d not in IGNORE_DIRS and d not in EXTRA_IGNORE_DIRS]
         yield dirpath, dirnames, filenames
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 配置驱动：约定默认值（DEFAULTS）
+# ────────────────────────────────────────────────────────────────────────────
+# 把原本散落在各处的硬编码「项目约定」集中到这里，作为内置默认 = 现有行为。
+# 用户可在 code-index.ini 的 [scan]/[java]/[mapper]/[vue] 段覆盖，从而适配
+# 不同目录结构 / 命名约定 / 注解，而无需改动核心代码。
+# ════════════════════════════════════════════════════════════════════════════
+
+DEFAULTS = {
+    "scan": {
+        "ignore_dirs": [],                          # 追加忽略目录（并入内置 IGNORE_DIRS）
+    },
+    "java": {
+        "source_marker": "src/main/java",           # 后端源码根标志（相对各模块）
+        "source_suffixes": [".java"],               # 方法索引扫描的源文件后缀
+        "controller_suffixes": ["Controller.java"], # API 索引：Controller 文件名后缀
+        "class_mapping_annotation": "RequestMapping",   # 类级路径前缀注解
+        # HTTP 映射注解 → HTTP 方法
+        "mapping_annotations": {
+            "GetMapping": "GET", "PostMapping": "POST", "PutMapping": "PUT",
+            "DeleteMapping": "DELETE", "PatchMapping": "PATCH", "RequestMapping": "ANY",
+        },
+    },
+    "mapper": {
+        "java_suffixes": ["Mapper.java"],           # Mapper 接口文件后缀
+        "xml_marker": "src/main/resources/mapper",  # Mapper XML 根标志（相对各模块）
+        "xml_suffixes": [".xml"],                   # Mapper XML 文件后缀
+        "sql_tags": ["select", "insert", "update", "delete"],   # XML SQL 标签
+        "inline_sql_annotations": ["Select", "Insert", "Update", "Delete"],  # 内联 SQL 注解
+    },
+    "vue": {
+        "root_markers": ["src/views", "src/router"],    # 前端根标志目录（任一存在即为前端根）
+        "router_dir": "src/router",                 # 自动扫描的静态路由目录
+        "views_alias": "@/views",                   # 视图组件别名前缀（path→文件 映射用）
+    },
+}
+
+
+def _split_list(raw: str) -> list:
+    """把逗号 / 换行分隔的字符串拆成去空白列表。"""
+    return [s.strip() for s in re.split(r"[,\n]", raw or "") if s.strip()]
+
+
+def _parse_ann_map(raw: str) -> dict:
+    """把 'GetMapping:GET, RequestMapping:ANY' 解析成 {注解: HTTP方法}，缺方法默认 ANY。"""
+    out = {}
+    for item in _split_list(raw):
+        if ":" in item:
+            k, v = item.split(":", 1)
+            out[k.strip()] = v.strip() or "ANY"
+        else:
+            out[item] = "ANY"
+    return out
+
+
+def _merge_conventions(parser: configparser.ConfigParser | None) -> dict:
+    """以 DEFAULTS 为基底，用 ini 的 [scan]/[java]/[mapper]/[vue] 段覆盖，返回生效约定。"""
+    import copy
+    conv = copy.deepcopy(DEFAULTS)
+    if parser is None:
+        return conv
+
+    def ov_list(sec, key):
+        if parser.has_option(sec, key):
+            conv[sec][key] = _split_list(parser.get(sec, key))
+
+    def ov_str(sec, key):
+        if parser.has_option(sec, key):
+            val = parser.get(sec, key).strip()
+            if val:
+                conv[sec][key] = val
+
+    ov_list("scan", "ignore_dirs")
+    ov_str("java", "source_marker")
+    ov_list("java", "source_suffixes")
+    ov_list("java", "controller_suffixes")
+    ov_str("java", "class_mapping_annotation")
+    if parser.has_option("java", "mapping_annotations"):
+        conv["java"]["mapping_annotations"] = _parse_ann_map(
+            parser.get("java", "mapping_annotations"))
+    ov_list("mapper", "java_suffixes")
+    ov_str("mapper", "xml_marker")
+    ov_list("mapper", "xml_suffixes")
+    ov_list("mapper", "sql_tags")
+    ov_list("mapper", "inline_sql_annotations")
+    ov_list("vue", "root_markers")
+    ov_str("vue", "router_dir")
+    ov_str("vue", "views_alias")
+    return conv
 
 
 # ════════════════════════════════════════════════════════════════════════════
 # 项目检测 + 上下文
 # ════════════════════════════════════════════════════════════════════════════
 
-def detect_java_roots(project_root: str) -> list[str]:
-    """递归查找所有 src/main/java 目录，兼容单模块和多模块 Maven 项目。"""
+def detect_java_roots(project_root: str, marker: str = "src/main/java") -> list[str]:
+    """递归查找所有后端源码根（默认 src/main/java），兼容单/多模块 Maven 项目。"""
+    parts = marker.strip("/").split("/")
     roots = []
     for dirpath, dirnames, _ in _walk(project_root):
-        java_root = os.path.join(dirpath, "src", "main", "java")
+        java_root = os.path.join(dirpath, *parts)
         if os.path.isdir(java_root):
             roots.append(java_root)
             dirnames[:] = []  # 命中后不再深入，避免嵌套模块重复计入
     return roots
 
 
-def detect_mapper_xml_roots(project_root: str) -> list[str]:
-    """递归查找所有 src/main/resources/mapper 目录。"""
+def detect_mapper_xml_roots(project_root: str, marker: str = "src/main/resources/mapper") -> list[str]:
+    """递归查找所有 Mapper XML 根目录（默认 src/main/resources/mapper）。"""
+    parts = marker.strip("/").split("/")
     roots = []
     for dirpath, dirnames, _ in _walk(project_root):
-        xml_root = os.path.join(dirpath, "src", "main", "resources", "mapper")
+        xml_root = os.path.join(dirpath, *parts)
         if os.path.isdir(xml_root):
             roots.append(xml_root)
             dirnames[:] = []
@@ -106,16 +203,15 @@ def derive_mapper_java_roots(java_src_roots: list[str]) -> list[str]:
     return result
 
 
-def detect_vue_roots(project_root: str) -> list[str]:
+def detect_vue_roots(project_root: str, root_markers=("src/views", "src/router")) -> list[str]:
     """
-    查找 Vue 前端项目根（含 src/views 或 src/router 的目录）。
+    查找 Vue 前端项目根（含任一标志目录，默认 src/views 或 src/router）。
     返回去重后的前端根目录列表。
     """
+    marker_parts = [m.strip("/").split("/") for m in root_markers]
     roots = []
     for dirpath, dirnames, _ in _walk(project_root):
-        has_views = os.path.isdir(os.path.join(dirpath, "src", "views"))
-        has_router = os.path.isdir(os.path.join(dirpath, "src", "router"))
-        if has_views or has_router:
+        if any(os.path.isdir(os.path.join(dirpath, *parts)) for parts in marker_parts):
             roots.append(dirpath)
             dirnames[:] = []  # 命中前端根后不再深入
     return roots
@@ -127,12 +223,14 @@ class Project:
     def __init__(self, root: str, config: dict, *, scan: bool = True):
         self.root = os.path.abspath(root)
         self.config = config
+        # 生效的项目约定（DEFAULTS + ini 覆盖）；缺省时回退内置默认
+        self.conv = config.get("conv") or _merge_conventions(None)
 
         if scan:
-            self.java_roots = detect_java_roots(self.root)
-            self.mapper_xml_roots = detect_mapper_xml_roots(self.root)
+            self.java_roots = detect_java_roots(self.root, self.conv["java"]["source_marker"])
+            self.mapper_xml_roots = detect_mapper_xml_roots(self.root, self.conv["mapper"]["xml_marker"])
             self.mapper_java_roots = derive_mapper_java_roots(self.java_roots)
-            self.vue_roots = detect_vue_roots(self.root)
+            self.vue_roots = detect_vue_roots(self.root, self.conv["vue"]["root_markers"])
         else:
             self.java_roots = []
             self.mapper_xml_roots = []
@@ -177,6 +275,7 @@ def load_config(project_root: str, config_path: str | None) -> dict:
     cfg: dict = {"vue_route_db": {}, "route_files": []}
 
     # 1) 配置文件
+    parser = None
     path = config_path or os.path.join(project_root, CONFIG_FILE_NAME)
     if os.path.isfile(path):
         parser = configparser.ConfigParser()
@@ -184,10 +283,11 @@ def load_config(project_root: str, config_path: str | None) -> dict:
             parser.read(path, encoding="utf-8")
         except Exception as e:
             print(f"[配置] 读取 {path} 失败：{e}")
-        if parser.has_section("vue_route_db"):
+            parser = None
+        if parser and parser.has_section("vue_route_db"):
             cfg["vue_route_db"] = dict(parser.items("vue_route_db"))
         # 手动指定的静态路由文件（逗号或换行分隔），用于路由不在 src/router 的项目
-        if parser.has_section("vue_route_static"):
+        if parser and parser.has_section("vue_route_static"):
             raw = parser.get("vue_route_static", "files", fallback="")
             cfg["route_files"] += [s.strip() for s in re.split(r"[,\n]", raw) if s.strip()]
 
@@ -209,6 +309,9 @@ def load_config(project_root: str, config_path: str | None) -> dict:
     env_files = os.environ.get("CODE_INDEX_ROUTE_FILES")
     if env_files:
         cfg["route_files"] += [s.strip() for s in env_files.split(",") if s.strip()]
+
+    # 4) 项目约定（DEFAULTS + ini 的 [scan]/[java]/[mapper]/[vue] 覆盖）
+    cfg["conv"] = _merge_conventions(parser)
 
     return cfg
 
@@ -272,24 +375,27 @@ def _extract_paths_from_annotation(text: str) -> list[str]:
     return paths if paths else [""]
 
 
-def parse_controller(filepath: str) -> list[dict]:
-    """解析单个 Controller，返回 API 接口列表（含类级 @RequestMapping 前缀拼接）。"""
+def parse_controller(filepath: str, mapping_annotations: dict = MAPPING_ANNOTATIONS,
+                     class_annotation: str = "RequestMapping") -> list[dict]:
+    """解析单个 Controller，返回 API 接口列表（含类级前缀注解拼接）。
+    mapping_annotations: {注解名: HTTP方法}；class_annotation: 类级路径前缀注解名。"""
     with open(filepath, encoding="utf-8", errors="ignore") as f:
         lines = f.readlines()
 
     total = len(lines)
     class_prefixes = [""]
+    cls_ann = re.escape(class_annotation)
 
     class_body_start, _ = _find_class_body_start(lines)
     for idx, line in enumerate(lines):
         if idx >= class_body_start:
             break
         stripped = line.strip()
-        m = re.match(r'@RequestMapping\s*\(([^)]*)\)', stripped)
+        m = re.match(rf'@{cls_ann}\s*\(([^)]*)\)', stripped)
         if m:
             class_prefixes = _extract_paths_from_annotation(m.group(1))
             continue
-        m2 = re.match(r'@RequestMapping\s*\(\s*"([^"]*)"\s*\)', stripped)
+        m2 = re.match(rf'@{cls_ann}\s*\(\s*"([^"]*)"\s*\)', stripped)
         if m2:
             class_prefixes = [m2.group(1)]
 
@@ -304,8 +410,8 @@ def parse_controller(filepath: str) -> list[dict]:
         stripped = line.strip()
 
         if annotation_name is None:
-            for ann in MAPPING_ANNOTATIONS:
-                pattern = rf'^@{ann}\s*[\(\"(]'
+            for ann in mapping_annotations:
+                pattern = rf'^@{re.escape(ann)}\s*[\(\"(]'
                 if re.match(pattern, stripped) or stripped == f'@{ann}':
                     annotation_name = ann
                     annotation_lines_buf = [stripped]
@@ -345,7 +451,7 @@ def parse_controller(filepath: str) -> list[dict]:
             while brace_line < total and '{' not in lines[brace_line]:
                 brace_line += 1
 
-            http_method = MAPPING_ANNOTATIONS[annotation_name]
+            http_method = mapping_annotations[annotation_name]
             for prefix in class_prefixes:
                 for mpath in method_paths:
                     full_path = (prefix.rstrip('/') + '/' + mpath.lstrip('/')).rstrip('/')
@@ -370,18 +476,23 @@ def parse_controller(filepath: str) -> list[dict]:
 
 
 def build_api_index(proj: Project) -> dict:
+    jconf = proj.conv["java"]
+    suffixes = tuple(jconf["controller_suffixes"])
+    mapping_annotations = jconf["mapping_annotations"]
+    class_annotation = jconf["class_mapping_annotation"]
+
     index: dict = {}
     controller_files = []
     for java_root in proj.java_roots:
         for root, _, files in _walk(java_root):
             for fname in files:
-                if fname.endswith("Controller.java"):
+                if fname.endswith(suffixes):
                     controller_files.append(os.path.join(root, fname))
 
     print(f"[API] 找到 {len(controller_files)} 个 Controller 文件，正在解析...")
     for fpath in controller_files:
         try:
-            for entry in parse_controller(fpath):
+            for entry in parse_controller(fpath, mapping_annotations, class_annotation):
                 index.setdefault(entry["path"], []).append(entry)
         except Exception as e:
             print(f"  [警告] {fpath}: {e}")
@@ -490,12 +601,13 @@ def parse_java_methods(filepath: str) -> list[dict]:
 
 
 def build_method_index(proj: Project) -> dict:
+    suffixes = tuple(proj.conv["java"]["source_suffixes"])
     index: dict = {}
     java_files = []
     for java_root in proj.java_roots:
         for root, _, files in _walk(java_root):
             for fname in files:
-                if fname.endswith(".java"):
+                if fname.endswith(suffixes):
                     java_files.append(os.path.join(root, fname))
 
     print(f"[方法] 找到 {len(java_files)} 个 Java 文件，正在解析...")
@@ -534,9 +646,12 @@ def _collect_annotation_block(lines: list[str], start: int) -> tuple[int, str]:
     return i, buf
 
 
-def parse_mapper_java(filepath: str) -> list[dict]:
+def parse_mapper_java(filepath: str,
+                      inline_annotations=("Select", "Insert", "Update", "Delete")) -> list[dict]:
     with open(filepath, encoding="utf-8", errors="ignore") as f:
         lines = f.readlines()
+
+    inline_re = re.compile(r'@(' + '|'.join(re.escape(a) for a in inline_annotations) + r')\b')
 
     total = len(lines)
     class_body_start, class_name = _find_class_body_start(lines)
@@ -556,7 +671,7 @@ def parse_mapper_java(filepath: str) -> list[dict]:
             inline_sql_type = None
             ann_start_line = i
 
-            m_inline = re.match(r'@(Select|Insert|Update|Delete)\b', stripped)
+            m_inline = inline_re.match(stripped)
             if m_inline:
                 inline_sql_type = m_inline.group(1).lower()
 
@@ -565,7 +680,7 @@ def parse_mapper_java(filepath: str) -> list[dict]:
             while i < total:
                 ns = lines[i].strip()
                 if ns.startswith('@'):
-                    m2 = re.match(r'@(Select|Insert|Update|Delete)\b', ns)
+                    m2 = inline_re.match(ns)
                     if m2:
                         inline_sql_type = m2.group(1).lower()
                     i, _ = _collect_annotation_block(lines, i)
@@ -626,7 +741,7 @@ def parse_mapper_java(filepath: str) -> list[dict]:
     return results
 
 
-def parse_mapper_xml(filepath: str) -> tuple[str | None, list[dict]]:
+def parse_mapper_xml(filepath: str, sql_tags=_MAPPER_SQL_TAGS) -> tuple[str | None, list[dict]]:
     with open(filepath, encoding="utf-8", errors="ignore") as f:
         lines = f.readlines()
 
@@ -644,7 +759,7 @@ def parse_mapper_xml(filepath: str) -> tuple[str | None, list[dict]]:
             i += 1
             continue
 
-        for tag in _MAPPER_SQL_TAGS:
+        for tag in sql_tags:
             m = re.search(rf'<{tag}[\s>][^>]*\bid="([^"]+)"', line)
             if m:
                 method_id = m.group(1)
@@ -674,19 +789,25 @@ def parse_mapper_xml(filepath: str) -> tuple[str | None, list[dict]]:
 
 
 def build_mapper_index(proj: Project) -> dict:
+    mconf = proj.conv["mapper"]
+    java_suffixes = tuple(mconf["java_suffixes"])
+    xml_suffixes = tuple(mconf["xml_suffixes"])
+    sql_tags = tuple(mconf["sql_tags"])
+    inline_annotations = tuple(mconf["inline_sql_annotations"])
+
     # Step 1：解析 Java Mapper 接口
     java_by_class: dict = {}
     java_files = []
     for mapper_root in proj.mapper_java_roots:
         for root, _, files in _walk(mapper_root):
             for fname in files:
-                if fname.endswith("Mapper.java"):
+                if fname.endswith(java_suffixes):
                     java_files.append(os.path.join(root, fname))
 
     print(f"[Mapper] 找到 {len(java_files)} 个 Mapper Java 文件，正在解析...")
     for fpath in java_files:
         try:
-            entries = parse_mapper_java(fpath)
+            entries = parse_mapper_java(fpath, inline_annotations)
             if entries:
                 java_by_class[entries[0]["class"]] = entries
         except Exception as e:
@@ -698,13 +819,13 @@ def build_mapper_index(proj: Project) -> dict:
     for xml_root in proj.mapper_xml_roots:
         for root, _, files in _walk(xml_root):
             for fname in files:
-                if fname.endswith(".xml"):
+                if fname.endswith(xml_suffixes):
                     xml_files.append(os.path.join(root, fname))
 
     print(f"[Mapper] 找到 {len(xml_files)} 个 Mapper XML 文件，正在解析...")
     for fpath in xml_files:
         try:
-            namespace, sql_entries = parse_mapper_xml(fpath)
+            namespace, sql_entries = parse_mapper_xml(fpath, sql_tags)
             if namespace:
                 xml_by_class[namespace.split('.')[-1]] = sql_entries
         except Exception as e:
@@ -860,11 +981,13 @@ def build_route_index_db(proj: Project, vue_root: str, db: dict) -> dict:
     return index
 
 
-def parse_vue_router(filepath: str) -> list[dict]:
+def parse_vue_router(filepath: str, views_alias: str = "@/views") -> list[dict]:
     """
     字符串安全的 vue-router 静态路由解析器。
-    通过括号深度跟踪嵌套，提取 path → @/views 组件映射（best-effort）。
+    通过括号深度跟踪嵌套，提取 path → 视图组件映射（best-effort）。
+    views_alias: 视图组件别名前缀（默认 @/views），只收集指向该前缀的组件。
     """
+    views_prefix = views_alias.rstrip("/") + "/"
     with open(filepath, encoding="utf-8", errors="ignore") as f:
         text = f.read()
 
@@ -915,7 +1038,7 @@ def parse_vue_router(filepath: str) -> list[dict]:
 
             if expect == "path" and stack:
                 stack[-1]["path"] = value
-            elif expect == "component" and value.startswith("@/views/"):
+            elif expect == "component" and value.startswith(views_prefix):
                 if stack:
                     stack[-1]["component"] = value
             expect = None
@@ -982,8 +1105,10 @@ def _resolve_route_files(vue_root: str, project_root: str, files) -> list:
 
 
 def build_route_index_static(proj: Project, vue_root: str, extra_files=()) -> dict:
-    """解析 src/router 下的静态路由文件（可追加手动指定的路由文件），构建路由索引（无需数据库）。"""
-    router_dir = os.path.join(vue_root, "src", "router")
+    """解析路由目录下的静态路由文件（可追加手动指定的路由文件），构建路由索引（无需数据库）。"""
+    vconf = proj.conv["vue"]
+    views_alias = vconf["views_alias"]
+    router_dir = os.path.join(vue_root, *vconf["router_dir"].strip("/").split("/"))
     router_files = []
     if os.path.isdir(router_dir):
         for root, _, files in _walk(router_dir):
@@ -1008,7 +1133,7 @@ def build_route_index_static(proj: Project, vue_root: str, extra_files=()) -> di
     index: dict = {}
     for fpath in router_files:
         try:
-            for r in parse_vue_router(fpath):
+            for r in parse_vue_router(fpath, views_alias):
                 comp = r["component"]                      # @/views/xxx
                 rel_view = comp[len("@/"):]                 # views/xxx
                 vue_rel = os.path.join("src", *rel_view.split("/")) + ".vue"
@@ -1362,6 +1487,19 @@ def cmd_doctor(proj: Project):
     else:
         print("  手动指定路由文件: 无（路由不在 src/router 时，用 --route-file 或配置 [vue_route_static] files）")
 
+    jc, mc, vc = proj.conv["java"], proj.conv["mapper"], proj.conv["vue"]
+    ann = ", ".join(f"{k}:{v}" for k, v in jc["mapping_annotations"].items())
+    print("\n生效约定（可在 code-index.ini 的 [scan]/[java]/[mapper]/[vue] 覆盖）:")
+    print(f"  [java]   源码根标志: {jc['source_marker']}   源文件后缀: {', '.join(jc['source_suffixes'])}")
+    print(f"  [java]   Controller 后缀: {', '.join(jc['controller_suffixes'])}   类前缀注解: @{jc['class_mapping_annotation']}")
+    print(f"  [java]   映射注解: {ann}")
+    print(f"  [mapper] 接口后缀: {', '.join(mc['java_suffixes'])}   XML 根: {mc['xml_marker']}   SQL 标签: {', '.join(mc['sql_tags'])}")
+    print(f"  [mapper] 内联 SQL 注解: {', '.join(mc['inline_sql_annotations'])}")
+    print(f"  [vue]    前端根标志: {', '.join(vc['root_markers'])}   路由目录: {vc['router_dir']}   视图别名: {vc['views_alias']}")
+    extra = proj.conv["scan"]["ignore_dirs"]
+    if extra:
+        print(f"  [scan]   追加忽略目录: {', '.join(extra)}")
+
     print("\n已有索引:")
     for label, path in [
         ("接口", proj.api_index_file), ("方法", proj.method_index_file),
@@ -1413,6 +1551,15 @@ _HELP_EPILOG = """
     python3 code_index.py --build --route-file src/config/router.config.js
   多个文件用逗号或多次 --route-file；路径相对 Vue 前端根或绝对路径。
   也可在 code-index.ini 配 [vue_route_static] files=...，或环境变量 CODE_INDEX_ROUTE_FILES。
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 配置驱动适配（适配不同目录结构 / 命名 / 注解，无需改源码）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  python3 code_index.py --doctor      查看当前生效的全部约定
+  在 code-index.ini 的 [scan]/[java]/[mapper]/[vue] 段逐项覆盖默认约定，例如：
+    [java]
+    controller_suffixes = Controller.java, Api.java
+  详见 README「配置驱动适配」与 code-index.ini.example。
 """
 
 
@@ -1446,6 +1593,8 @@ def main():
 
     project_root = os.path.abspath(args.project) if args.project else _SCRIPT_DIR
     config = load_config(project_root, args.config)
+    # 配置中追加的忽略目录，在扫描（构建 Project）前生效
+    EXTRA_IGNORE_DIRS.update(config.get("conv", {}).get("scan", {}).get("ignore_dirs", []))
     cli_db = {
         "host": args.host, "port": args.port, "database": args.db,
         "user": args.user, "password": args.password,

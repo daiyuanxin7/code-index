@@ -20,6 +20,7 @@
 - **零依赖**：只用 Python 3 标准库（前端 DB 模式可选依赖 `mysql` 命令行客户端）。
 - **单文件**：只有一个 `code_index.py`，复制即用。
 - **自动检测**：自动发现多模块 Maven 的每个 `src/main/java`、Mapper 目录、Vue 前端根。
+- **配置驱动适配**：目录结构 / 命名约定 / 注解都可在 `code-index.ini` 覆盖，适配不同项目而**无需改工具源码**（详见下文）。
 - **凭据外置**：数据库连接信息走配置文件 / 环境变量 / 命令行，**绝不写进源码**。
 - **智能匹配**：精确 → 路径变量（`/user/{id}`、`/ra/:accountId`）→ 关键词模糊，逐级回退。
 
@@ -155,6 +156,68 @@ python3 code_index.py --build --host 127.0.0.1 --db your-db --user u --password 
 ```
 
 > 配置了 `database` 即视为启用 DB 模式；DB 连不上时会自动回退到静态模式。
+
+## 配置驱动适配：覆盖默认约定
+
+工具内置了一套默认约定（Spring Boot + MyBatis + RuoYi/JeecgBoot-Vue），**不写任何配置即可开箱即用**。当你的项目用了不同的目录结构 / 命名约定 / 注解时，在 `code-index.ini` 里覆盖对应项即可适配，**无需改工具源码**。
+
+先用 `--doctor` 查看当前生效的全部约定：
+
+```bash
+python3 code_index.py --doctor
+```
+
+可覆盖的约定（每项的值即内置默认）：
+
+```ini
+[scan]
+# 额外忽略的目录（并入内置忽略表），逗号分隔
+ignore_dirs = generated, third_party
+
+[java]
+source_marker = src/main/java                 # 后端源码根标志（相对各模块）
+source_suffixes = .java                        # 方法索引扫描的源文件后缀
+controller_suffixes = Controller.java          # Controller 文件后缀，可多个
+class_mapping_annotation = RequestMapping      # 类级路径前缀注解
+mapping_annotations = GetMapping:GET, PostMapping:POST, PutMapping:PUT, DeleteMapping:DELETE, PatchMapping:PATCH, RequestMapping:ANY
+
+[mapper]
+java_suffixes = Mapper.java                    # Mapper 接口文件后缀，可多个
+xml_marker = src/main/resources/mapper         # Mapper XML 根标志
+xml_suffixes = .xml
+sql_tags = select, insert, update, delete      # XML 里的 SQL 标签
+inline_sql_annotations = Select, Insert, Update, Delete
+
+[vue]
+root_markers = src/views, src/router           # 前端根标志目录（任一存在即为前端根）
+router_dir = src/router                         # 自动扫描的静态路由目录
+views_alias = @/views                           # 视图组件别名前缀
+```
+
+**常见适配示例**
+
+- Controller 命名不是 `*Controller`（如 `*Api`、`*Resource`、`*Endpoint`）：
+  ```ini
+  [java]
+  controller_suffixes = Controller.java, Api.java, Resource.java
+  ```
+- Mapper 接口叫 `*Dao`：
+  ```ini
+  [mapper]
+  java_suffixes = Mapper.java, Dao.java
+  ```
+- 后端源码不在 `src/main/java`（非 Maven 布局）：
+  ```ini
+  [java]
+  source_marker = app/src
+  ```
+- 前端视图别名是 `@/pages`：
+  ```ini
+  [vue]
+  views_alias = @/pages
+  ```
+
+> 配置项是「逐项覆盖」：只写你要改的，其余仍用默认。改完跑 `--build` 即生效，`--doctor` 可核对。
 
 ## ⚠️ 凭据安全
 

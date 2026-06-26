@@ -1021,7 +1021,10 @@ def build_route_index_db(proj: Project, vue_root: str, db: dict) -> dict:
         if not component or component.strip() in ("Layout", "ParentView", "InnerLink", ""):
             continue
 
-        vue_rel = os.path.join("src", "views", *component.strip("/").split("/")) + ".vue"
+        comp_path = component.strip("/")                   # 可能已带 .vue
+        if comp_path.endswith(".vue"):
+            comp_path = comp_path[:-len(".vue")]
+        vue_rel = os.path.join("src", "views", *comp_path.split("/")) + ".vue"
         vue_abs = os.path.join(vue_root, vue_rel)
         path = full_path(row)
         entry = {
@@ -1193,7 +1196,9 @@ def build_route_index_static(proj: Project, vue_root: str, extra_files=()) -> di
         try:
             for r in parse_vue_router(fpath, views_alias):
                 comp = r["component"]                      # @/views/xxx
-                rel_view = comp[len("@/"):]                 # views/xxx
+                rel_view = comp[len("@/"):]                 # views/xxx（可能已带 .vue）
+                if rel_view.endswith(".vue"):              # 源码里组件路径已写后缀时不重复追加
+                    rel_view = rel_view[:-len(".vue")]
                 vue_rel = os.path.join("src", *rel_view.split("/")) + ".vue"
                 vue_abs = os.path.join(vue_root, vue_rel)
                 entry = {
